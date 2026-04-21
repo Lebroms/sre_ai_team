@@ -1,7 +1,24 @@
+import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
 from crewai import Agent, Task, Crew, Process, LLM
+from crewai.mcp import MCPServerStdio
+
+# ==========================================
+# SETUP MCP SERVER (Kubernetes)
+# ==========================================
+# Copiamo le variabili d'ambiente di Windows in modo che "uvx" e "kubectl" funzionino
+mcp_env = os.environ.copy()
+# SOSTITUISCI CON IL PATH CORRETTO DI WINDOWS (usa i doppi slash per evitare escape di python)
+mcp_env["KUBECONFIG"] = "C:\\Users\\emagi\\.kube\\config"
+
+# Inizializziamo la connessione Stdio verso il server MCP ufficiale di K8s
+kubernetes_mcp = MCPServerStdio(
+    command="uvx",
+    args=["kubernetes-mcp-server@latest"],
+    env=mcp_env
+)
 
 # ==========================================
 # 1. INIZIALIZZAZIONE FASTAPI E CONFIGURAZIONE
@@ -12,12 +29,26 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Setup LLM Locale (Ollama)
+'''# Setup LLM Locale (Ollama)
 # Nota: La GPU NVIDIA GTX 1660 Ti gestirà l'inferenza localmente
 local_llm = LLM(
     model="ollama/qwen2.5-coder:7b",
     base_url="http://localhost:11434",
     temperature=0.1 # Temperatura bassa per risposte tecniche e deterministiche
+)'''
+
+# ==========================================
+# TRUCCO SRE: FORZARE IL TOOL CALLING (OPENAI EMULATION)
+# ==========================================
+# LiteLLM (usato da CrewAI) richiede una chiave fittizia per i provider OpenAI-compatibili
+os.environ["OPENAI_API_KEY"] = "ollama-local"
+
+local_llm = LLM(
+    # Cambiamo il prefisso da "ollama/" a "openai/"
+    model="openai/qwen2.5-coder:7b",
+    # Puntiamo all'endpoint /v1 di Ollama che gestisce il function calling standard
+    base_url="http://localhost:11434/v1",
+    temperature=0.1
 )
 
 # ==========================================
@@ -70,16 +101,33 @@ def analyze_alert(alert: AlertPayload):
         verbose=True
     )
 
+    def k8s_action_callback(step_output):
+        """
+        Intercetta i passaggi intermedi dell'agente. 
+        Stampa a schermo quando sta per eseguire un tool MCP.
+        """
+        # CrewAI restituisce una tupla quando esegue un tool: (ToolName, ToolInput)
+        if isinstance(step_output, tuple) and len(step_output) == 2:
+            tool_name, tool_input = step_output
+            print("\n⚙️ [MCP EXECUTION] L'agente sta eseguendo il comando K8s!")
+            print(f"   🛠️ Tool: {tool_name}")
+            print(f"   📦 Payload: {tool_input}\n")
+        else:
+            print(f"\n🧠 [Agent Thinking] {step_output}\n")
+
     # 2. L'Analista (Cloud Architect)
     analysis_agent = Agent(
         role='Senior Cloud Architect',
-        goal='Determine the potential root causes of the Kubernetes failure based on the Triage brief.',
+        goal='Determine the exact root cause of the Kubernetes failure by actively interrogating the cluster using your MCP tools.',
         backstory=(
-            "You are a deeply technical Kubernetes expert. You receive an incident brief about a failing pod. "
-            "Since you cannot run commands yet, you list the top 3 most likely infrastructural root causes "
-            "(e.g., OOMKilled, misconfigured Readiness Probe, missing ConfigMap) based on the alert 'reason'."
+            "You are a deeply technical Kubernetes expert. "
+            "CRITICAL INSTRUCTION: You MUST use your Kubernetes MCP tools to fetch live data. "
+            "Do NOT output raw JSON as your final answer. You must execute the tool to get the real data back. "
+            "Base your analysis STRICTLY on the actual output returned by the MCP tool, not your assumptions."
         ),
         llm=local_llm,
+        mcps=[kubernetes_mcp], 
+        step_callback=k8s_action_callback, # <--- IL NOSTRO SISTEMA DI MONITORAGGIO
         verbose=True
     )
 
@@ -107,8 +155,14 @@ def analyze_alert(alert: AlertPayload):
     )
 
     analysis_task = Task(
-        description="Review the incident brief. Detail the 3 most probable root causes for this specific failure in a K3s environment.",
-        expected_output="A technical list of probable root causes and what 'kubectl' commands would prove them.",
+        description=(
+            f"Review this incident brief: Namespace: {alert.namespace}, Pod: {alert.pod}. "
+            "1. Use the Kubernetes MCP tool to get the events or resources for this pod. "
+            "2. WAIT for the tool to return the data. "
+            "3. Read the data returned by the tool. "
+            "4. Detail the exact root cause based ONLY on that live data."
+        ),
+        expected_output="A technical explanation of the actual root cause based strictly on the MCP output.",
         agent=analysis_agent
     )
 
