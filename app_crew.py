@@ -37,7 +37,7 @@ local_llm = LLM(
     temperature=0.1 # Temperatura bassa per risposte tecniche e deterministiche
 )'''
 
-# ==========================================
+'''# ==========================================
 # TRUCCO SRE: FORZARE IL TOOL CALLING (OPENAI EMULATION)
 # ==========================================
 # LiteLLM (usato da CrewAI) richiede una chiave fittizia per i provider OpenAI-compatibili
@@ -49,8 +49,13 @@ local_llm = LLM(
     # Puntiamo all'endpoint /v1 di Ollama che gestisce il function calling standard
     base_url="http://localhost:11434/v1",
     temperature=0.1
-)
+)'''
 
+local_llm = LLM(
+    model="openai/gpt-4.1-mini",  # o "openai/gpt-4.1-mini" se più stabile
+    base_url=os.getenv("OPENAI_BASE_URL"),
+    temperature=0.1  # bassa temperatura per comandi infrastrutturali deterministici
+)
 # ==========================================
 # 2. DATA CONTRACT DEFINITION (PYDANTIC)
 # ==========================================
@@ -121,9 +126,10 @@ def analyze_alert(alert: AlertPayload):
         goal='Determine the exact root cause of the Kubernetes failure by actively interrogating the cluster using your MCP tools.',
         backstory=(
             "You are a deeply technical Kubernetes expert. "
-            "CRITICAL INSTRUCTION: You MUST use your Kubernetes MCP tools to fetch live data. "
-            "Do NOT output raw JSON as your final answer. You must execute the tool to get the real data back. "
-            "Base your analysis STRICTLY on the actual output returned by the MCP tool, not your assumptions."
+            "CRITICAL RESOURCE CONSTRAINT: Your memory is extremely limited. "
+            "When using Kubernetes MCP tools like 'pods_log' or 'events_list', you MUST inspect the tool's JSON schema. "
+            "If the schema allows for arguments like 'tailLines', 'limit', or 'previous', you MUST strictly set them to a maximum of 10. "
+            "Do not output raw JSON as your final answer. Always use the proper Action/Action Input format."
         ),
         llm=local_llm,
         mcps=[kubernetes_mcp], 
@@ -157,10 +163,11 @@ def analyze_alert(alert: AlertPayload):
     analysis_task = Task(
         description=(
             f"Review this incident brief: Namespace: {alert.namespace}, Pod: {alert.pod}. "
-            "1. Use the Kubernetes MCP tool to get the events or resources for this pod. "
-            "2. WAIT for the tool to return the data. "
-            "3. Read the data returned by the tool. "
-            "4. Detail the exact root cause based ONLY on that live data."
+            "1. Use the Kubernetes MCP tool to get the logs for this pod. YOU MUST limit the response to 10 lines if the tool allows it. "
+            "2. If logs are empty, use the events tool. "
+            "3. WAIT for the tool to return the data. "
+            "4. Read the data returned by the tool. "
+            "5. Detail the exact root cause based ONLY on that live data."
         ),
         expected_output="A technical explanation of the actual root cause based strictly on the MCP output.",
         agent=analysis_agent
