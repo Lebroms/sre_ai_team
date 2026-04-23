@@ -5,6 +5,7 @@ import uvicorn
 from crewai import Agent, Task, Crew, Process, LLM
 from crewai.mcp import MCPServerStdio
 
+
 # ==========================================
 # SETUP MCP SERVER (Kubernetes)
 # ==========================================
@@ -95,96 +96,131 @@ def analyze_alert(alert: AlertPayload):
 
     def k8s_action_callback(step_output):
         """
-        Intercetta i passaggi intermedi dell'agente. 
-        Supporta i nuovi oggetti AgentAction di CrewAI.
+        Intercetta le azioni dell'agente controllando esplicitamente la classe dell'oggetto.
+        Fornisce un Audit Trail pulito per gli strumenti MCP.
         """
+        print("\n" + "="*60)
+        print("🕵️  [AUDIT TRAIL - ESECUZIONE SRE]")
+        
         try:
-            # CrewAI a volte passa una lista di azioni, a volte una singola azione
-            action = step_output[0] if isinstance(step_output, list) else step_output
+            # CrewAI a volte passa una lista, a volte un singolo oggetto
+            steps = step_output if isinstance(step_output, list) else [step_output]
+            
+            for step in steps:
+                # Se CrewAI incapsula l'azione in una tupla (Azione, Risultato), prendiamo l'Azione
+                action = step[0] if isinstance(step, tuple) else step
+                
+                # Identifichiamo il tipo di oggetto in modo esatto
+                class_name = type(action).__name__
+                
+                if class_name == 'AgentAction':
+                    print(f"⚙️  TOOL K8S INVOCATO : {getattr(action, 'tool', 'Sconosciuto')}")
+                    print("📦 PAYLOAD JSON      :")
+                    import pprint
+                    pprint.pprint(getattr(action, 'tool_input', {}), indent=4)
+                    
+                    # Stampiamo il pensiero dell'agente prima di usare il tool
+                    if hasattr(action, 'log') and action.log:
+                        thought = action.log.split('Action:')[0].strip()
+                        print(f"🧠 RAGIONAMENTO      : {thought}")
+                        
+                elif class_name == 'AgentFinish':
+                    print("✅ TASK COMPLETATO (AgentFinish)")
+                    # Non stampiamo tutto il testo qui perché CrewAI lo formatterà in verde alla fine
+                    
+        except Exception as e:
+            print(f"⚠️ Errore silente nella callback di audit: {e}")
+            
+        print("="*60 + "\n")
 
-            # Se l'oggetto ha gli attributi 'tool' e 'tool_input', è un'esecuzione MCP!
-            if hasattr(action, 'tool') and hasattr(action, 'tool_input'):
-                print("\n⚙️ [MCP EXECUTION] L'agente sta chiamando il cluster K8s!")
-                print(f"   🛠️ Tool: {action.tool}")
-                print(f"   📦 Payload: {action.tool_input}\n")
-            elif hasattr(action, 'log'):
-                # Stampa i pensieri interni dell'agente (Thought Process)
-                print(f"\n🧠 [Agent Thinking] {action.log.strip()}\n")
-            else:
-                pass
-        except Exception:
-            pass # Fallback silenzioso per non far crashare l'API
 
-
+    # ==========================================
     # 1. L'Investigatore (Triage)
+    # ==========================================
     triage_agent = Agent(
-        role='L1 SRE Triage Responder',
-        goal='Analyze incoming Prometheus alerts, identify the scope of the issue, and prepare a preliminary incident brief.',
+        role='L1 SRE Incident Commander',
+        goal='Parse raw monitoring alerts into structured incident briefs, identifying the blast radius and affected system components.',
         backstory=(
-            "You are the first line of defense for an AWS EC2 (eu-west-1) K3s cluster. "
-            "You receive raw monitoring alerts, filter out the noise, and structure the problem "
-            "so the senior architects can understand exactly what system is failing."
+            "You are the first line of defense in a modern Cloud-Native reliability team. "
+            "Your job is not to solve the problem, but to structure the chaos. "
+            "You ingest raw telemetry and alerts, extract the exact target entities (Namespaces, Pods, Nodes, etc.), "
+            "evaluate the severity, and summarize the observable symptoms for the diagnostic team."
         ),
         llm=local_llm,
         verbose=True
     )
 
+    triage_task = Task(
+        description=(
+            f"Analyze this incoming telemetry/alert: {alert_context}. "
+            "1. Extract the failing component(s) (e.g., Namespace, Pod, Service). "
+            "2. Identify the primary symptom (e.g., CrashLoop, HighCPU, OOM). "
+            "3. Assess the business/system impact based on the severity. "
+            "Output a concise Incident Brief."
+        ),
+        expected_output="A structured Incident Brief identifying the exact target resources, symptoms, and severity.",
+        agent=triage_agent
+    )
+
+    # ==========================================
     # 2. L'Analista (Cloud Architect)
+    # ==========================================
     analysis_agent = Agent(
-        role='Senior Cloud Architect',
-        goal='Determine the exact root cause of the Kubernetes failure by actively interrogating the cluster using your MCP tools.',
+        role='Senior Cloud Ops Diagnostician',
+        goal='Conduct a systematic root cause analysis by dynamically interrogating cluster state, telemetry, and related configurations.',
         backstory=(
-            "You are a deeply technical Kubernetes expert. "
-            "CRITICAL RESOURCE CONSTRAINT: Your memory is extremely limited. "
-            "When using Kubernetes MCP tools like 'pods_log' or 'events_list', you MUST inspect the tool's JSON schema. "
-            "If the schema allows for arguments like 'tailLines', 'limit', or 'previous', you MUST strictly set them to a maximum of 10. "
-            "Do not output raw JSON as your final answer. Always use the proper Action/Action Input format."
+            "You are a methodical Kubernetes and Cloud infrastructure expert. You do not guess; you gather evidence. "
+            "You follow a strict diagnostic loop: Symptom -> Hypothesis -> Fetch Data -> Validate. "
+            "CRITICAL SYSTEM CONSTRAINT: You must aggressively protect your context window. Whenever you use tools to fetch logs, events, or lists of resources, "
+            "you MUST use parameters (like 'tailLines', 'limit', or grep-like filters) to restrict the output to a maximum of 15-20 lines/items. "
+            "Remember that a failing component is often a victim of a misconfiguration elsewhere (e.g., missing Services, invalid ConfigMaps, or bad manifests). "
+            "Investigate the ecosystem around the failing component."
         ),
         llm=local_llm,
         mcps=[kubernetes_mcp], 
-        step_callback=k8s_action_callback, # <--- IL NOSTRO SISTEMA DI MONITORAGGIO
+        step_callback=k8s_action_callback,
         verbose=True
-    )
-
-    # 3. Il Risolutore (DevOps Engineer)
-    remediation_agent = Agent(
-        role='DevOps Automation Engineer',
-        goal='Draft the GitOps infrastructure fix to resolve the root cause.',
-        backstory=(
-            "You are a strict DevOps engineer who follows GitOps principles. You never run imperative commands like 'kubectl edit'. "
-            "Based on the Architect's analysis, you draft the exact YAML patch (e.g., resources limits, env vars) "
-            "that needs to be committed to the GitHub repository to permanently fix the issue."
-        ),
-        llm=local_llm,
-        verbose=True
-    )
-
-    # ==========================================
-    # DEFINIZIONE DEI TASK (Workflow Sequenziale)
-    # ==========================================
-
-    triage_task = Task(
-        description=f"Analyze this alert: {alert_context}. Extract Namespace, Pod, and Reason. Summarize the business impact.",
-        expected_output="A short incident brief outlining the affected K8s resources and severity.",
-        agent=triage_agent
     )
 
     analysis_task = Task(
         description=(
-            f"Review this incident brief: Namespace: {alert.namespace}, Pod: {alert.pod}. "
-            "1. Use the Kubernetes MCP tool to get the logs for this pod. YOU MUST limit the response to 10 lines if the tool allows it. "
-            "2. If logs are empty, use the events tool. "
-            "3. WAIT for the tool to return the data. "
-            "4. Read the data returned by the tool. "
-            "5. Detail the exact root cause based ONLY on that live data."
+            "Based on the Incident Brief, find the root cause of the failure. "
+            "1. Formulate initial hypotheses based on the symptom. "
+            "2. Use your MCP tools to inspect the target component's state, recent events, and limited logs (MAX 15 lines). "
+            "3. SYSTEMATIC DISCOVERY RULE: If the logs indicate ANY connection issue, DNS resolution failure (ENOTFOUND), or missing endpoint, "
+            "you MUST actively interrogate the cluster to discover the correct endpoints. "
+            "Do this by using your tools to list the existing 'Services' and 'ConfigMaps' in the namespace. "
+            "4. Cross-reference the failed connection attempt from the logs with the actual Services you discovered to find the mismatch. "
+            "5. Conclude with a definitive, evidence-based root cause, explicitly naming the correct configurations if a mismatch is found."
         ),
-        expected_output="A technical explanation of the actual root cause based strictly on the MCP output.",
+        expected_output="A comprehensive diagnostic report detailing the evidence found, the root cause, and the correct target variables/endpoints discovered in the cluster.",
         agent=analysis_agent
     )
 
+    # ==========================================
+    # 3. Il Risolutore (DevOps Engineer)
+    # ==========================================
+    remediation_agent = Agent(
+        role='GitOps Automation Engineer',
+        goal='Translate the diagnostic root cause into precise, committable Infrastructure-as-Code (IaC) or manifest patches.',
+        backstory=(
+            "You are a strict DevOps engineer operating in a Zero-Touch, GitOps-driven environment. "
+            "You NEVER execute imperative state-changing commands (like 'kubectl edit' or 'apply') directly on the cluster. "
+            "Your job is to identify what needs to change in the source code or Kubernetes manifests to permanently resolve the root cause. "
+            "You prepare professional, complete Pull Request proposals that human engineers can review and merge."
+        ),
+        llm=local_llm,
+        verbose=True
+    )
+
     remediation_task = Task(
-        description="Based on the analysis, write the exact YAML snippet that needs to be updated in the Git repository to fix the most likely root cause. Format it as a GitOps Pull Request proposal.",
-        expected_output="A final Markdown report combining the Triage, Analysis, and the proposed YAML patch for the GitOps PR.",
+        description=(
+            "Review the root cause analysis. "
+            "1. Identify the logical fix required (e.g., updating a variable, fixing a typo in a Service, adjusting resource limits). "
+            "2. Draft the exact YAML snippet or code configuration change needed. "
+            "3. Format your final output as a comprehensive GitHub Pull Request body, including 'What changed', 'Why', and the exact code diff/patch."
+        ),
+        expected_output="A structured Markdown document formatted as a GitHub Pull Request, containing the context, justification, and the exact code changes needed to fix the issue.",
         agent=remediation_agent
     )
 
