@@ -93,6 +93,29 @@ def analyze_alert(alert: AlertPayload):
     # DEFINIZIONE Architettura Multi-Agente
     # ==========================================
 
+    def k8s_action_callback(step_output):
+        """
+        Intercetta i passaggi intermedi dell'agente. 
+        Supporta i nuovi oggetti AgentAction di CrewAI.
+        """
+        try:
+            # CrewAI a volte passa una lista di azioni, a volte una singola azione
+            action = step_output[0] if isinstance(step_output, list) else step_output
+
+            # Se l'oggetto ha gli attributi 'tool' e 'tool_input', è un'esecuzione MCP!
+            if hasattr(action, 'tool') and hasattr(action, 'tool_input'):
+                print("\n⚙️ [MCP EXECUTION] L'agente sta chiamando il cluster K8s!")
+                print(f"   🛠️ Tool: {action.tool}")
+                print(f"   📦 Payload: {action.tool_input}\n")
+            elif hasattr(action, 'log'):
+                # Stampa i pensieri interni dell'agente (Thought Process)
+                print(f"\n🧠 [Agent Thinking] {action.log.strip()}\n")
+            else:
+                pass
+        except Exception:
+            pass # Fallback silenzioso per non far crashare l'API
+
+
     # 1. L'Investigatore (Triage)
     triage_agent = Agent(
         role='L1 SRE Triage Responder',
@@ -105,20 +128,6 @@ def analyze_alert(alert: AlertPayload):
         llm=local_llm,
         verbose=True
     )
-
-    def k8s_action_callback(step_output):
-        """
-        Intercetta i passaggi intermedi dell'agente. 
-        Stampa a schermo quando sta per eseguire un tool MCP.
-        """
-        # CrewAI restituisce una tupla quando esegue un tool: (ToolName, ToolInput)
-        if isinstance(step_output, tuple) and len(step_output) == 2:
-            tool_name, tool_input = step_output
-            print("\n⚙️ [MCP EXECUTION] L'agente sta eseguendo il comando K8s!")
-            print(f"   🛠️ Tool: {tool_name}")
-            print(f"   📦 Payload: {tool_input}\n")
-        else:
-            print(f"\n🧠 [Agent Thinking] {step_output}\n")
 
     # 2. L'Analista (Cloud Architect)
     analysis_agent = Agent(
