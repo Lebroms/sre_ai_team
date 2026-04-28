@@ -1,4 +1,5 @@
-import os
+import os 
+import sys
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
@@ -19,6 +20,16 @@ kubernetes_mcp = MCPServerStdio(
     command="uvx",
     args=["kubernetes-mcp-server@latest"],
     env=mcp_env
+)
+
+# ==========================================
+# SETUP MCP SERVER (GitHub Custom)
+# ==========================================
+# Avviamo il nostro script python come server MCP indipendente
+github_mcp = MCPServerStdio(
+    command=sys.executable, # Usa l'interprete Python corrente
+    args=["github_mcp_server.py"], # Punta al file che abbiamo appena creato
+    env=os.environ.copy() # Passa il token GitHub caricato da .env
 )
 
 # ==========================================
@@ -202,25 +213,37 @@ def analyze_alert(alert: AlertPayload):
     # ==========================================
     remediation_agent = Agent(
         role='GitOps Automation Engineer',
-        goal='Translate the diagnostic root cause into precise, committable Infrastructure-as-Code (IaC) or manifest patches.',
+        goal='Translate the diagnostic root cause into precise, committable Infrastructure-as-Code (IaC) patches and open a GitHub PR.',
         backstory=(
             "You are a strict DevOps engineer operating in a Zero-Touch, GitOps-driven environment. "
-            "You NEVER execute imperative state-changing commands (like 'kubectl edit' or 'apply') directly on the cluster. "
-            "Your job is to identify what needs to change in the source code or Kubernetes manifests to permanently resolve the root cause. "
-            "You prepare professional, complete Pull Request proposals that human engineers can review and merge."
+            "You NEVER execute imperative state-changing commands on the cluster. "
+            "PROCEDURE: "
+            "1. Identify the target repository and the erroneous value from the Architect's report. "
+            "2. DO NOT GUESS FILE PATHS BLINDLY. Use repository search tools (like search_code or get_directory_contents)."
+            "3. Use 'get_file_content' to read the actual broken manifest. "
+            "4. Generate the FULL, modified YAML content. "
+            "5. Use 'create_gitops_pull_request' to open the PR with a professional title and the Architect's report as the body."
         ),
         llm=local_llm,
+        mcps=[github_mcp], # <--- GLI DIAMO LE MANI!
+        step_callback=k8s_action_callback, # Usiamo la stessa callback per vedere cosa fa
         verbose=True
     )
 
     remediation_task = Task(
         description=(
-            "Review the root cause analysis. "
-            "1. Identify the logical fix required (e.g., updating a variable, fixing a typo in a Service, adjusting resource limits). "
-            "2. Draft the exact YAML snippet or code configuration change needed. "
-            "3. Format your final output as a comprehensive GitHub Pull Request body, including 'What changed', 'Why', and the exact code diff/patch."
+            "Review the root cause analysis provided by the Cloud Architect. "
+            "Your objective is to physically open a Pull Request to fix the infrastructure state. "
+            "ENVIRONMENT VARIABLES: "
+            "TARGET_GITHUB_REPO: 'Lebroms/cloudops_shoes' "  
+            "EXECUTION WORKFLOW: "
+            "1. Search the TARGET_GITHUB_REPO to find the exact file path containing the misconfiguration. You can search for the resource name ) or the wrong value. " # (e.g., Kubernetes YAMLs, Terraform .tf files, Dockerfiles, or ConfigMaps)
+            "2. Once you have the exact file path, use the 'get_file_content' tool to fetch its raw content. "
+            "3. Analyze the raw code and apply a surgical fix to resolve the root cause WITHOUT altering unrelated configurations. "
+            "4. Use the 'create_gitops_pull_request' tool on the TARGET_GITHUB_REPO to open the PR with the updated file content. "
+            "5. Make sure the PR title is professional and the body summarizes the architectural fix."
         ),
-        expected_output="A structured Markdown document formatted as a GitHub Pull Request, containing the context, justification, and the exact code changes needed to fix the issue.",
+        expected_output="A success message confirming the Pull Request was created, explicitly including the GitHub URL.",
         agent=remediation_agent
     )
 
