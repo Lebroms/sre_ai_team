@@ -11,14 +11,23 @@ load_dotenv()
 # ==========================================
 # SETUP MCP SERVER (Kubernetes)
 # ==========================================
-# Copiamo le variabili d'ambiente di Windows in modo che "uvx" e "kubectl" funzionino
+# Copiamo le variabili d'ambiente per passargliele
 mcp_env = os.environ.copy()
-# SOSTITUISCI CON IL PATH CORRETTO DI WINDOWS (usa i doppi slash per evitare escape di python)
-mcp_env["KUBECONFIG"] = "C:\\Users\\emagi\\.kube\\config"
 
-# Inizializziamo la connessione Stdio verso il server MCP ufficiale di K8s
+# 1. FIX KUBECONFIG: Usiamo os.path.expanduser per trovare dinamicamente /home/emagi/.kube/config
+kubeconfig_path = os.path.expanduser("~/.kube/config")
+mcp_env["KUBECONFIG"] = kubeconfig_path
+
+# 2. FIX JSON/STDIO ERROR: Aggiungiamo i flag --quiet, --cluster-provider e --kubeconfig
 kubernetes_mcp = MCPServerStdio(
-    command="uvx", args=["kubernetes-mcp-server@latest"], env=mcp_env
+    command="uvx", 
+    args=[
+        "--quiet",                            # FONDAMENTALE: Zittisce i log di download di uvx
+        "kubernetes-mcp-server@latest", 
+        "--cluster-provider", "kubeconfig",   # Forza il server a non cercare cluster nel vuoto
+        "--kubeconfig", kubeconfig_path       # Passa il path esatto
+    ], 
+    env=mcp_env
 )
 
 # ==========================================
