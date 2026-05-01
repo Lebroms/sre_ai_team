@@ -1,12 +1,13 @@
-import os 
+import os
 import sys
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
+from dotenv import load_dotenv
 from crewai import Agent, Task, Crew, Process, LLM
 from crewai.mcp import MCPServerStdio
 
-
+load_dotenv()
 # ==========================================
 # SETUP MCP SERVER (Kubernetes)
 # ==========================================
@@ -17,9 +18,7 @@ mcp_env["KUBECONFIG"] = "C:\\Users\\emagi\\.kube\\config"
 
 # Inizializziamo la connessione Stdio verso il server MCP ufficiale di K8s
 kubernetes_mcp = MCPServerStdio(
-    command="uvx",
-    args=["kubernetes-mcp-server@latest"],
-    env=mcp_env
+    command="uvx", args=["kubernetes-mcp-server@latest"], env=mcp_env
 )
 
 # ==========================================
@@ -27,9 +26,9 @@ kubernetes_mcp = MCPServerStdio(
 # ==========================================
 # Avviamo il nostro script python come server MCP indipendente
 github_mcp = MCPServerStdio(
-    command=sys.executable, # Usa l'interprete Python corrente
-    args=["github_mcp_server.py"], # Punta al file che abbiamo appena creato
-    env=os.environ.copy() # Passa il token GitHub caricato da .env
+    command=sys.executable,  # Usa l'interprete Python corrente
+    args=["github_mcp_server.py"],  # Punta al file che abbiamo appena creato
+    env=os.environ.copy(),  # Passa il token GitHub caricato da .env
 )
 
 # ==========================================
@@ -38,18 +37,18 @@ github_mcp = MCPServerStdio(
 app = FastAPI(
     title="AIOps SRE Brain API",
     description="Microservizio AI per l'analisi Zero-Touch degli allarmi K3s e remediation GitOps",
-    version="1.0.0"
+    version="1.0.0",
 )
 
-'''# Setup LLM Locale (Ollama)
+"""# Setup LLM Locale (Ollama)
 # Nota: La GPU NVIDIA GTX 1660 Ti gestirà l'inferenza localmente
 local_llm = LLM(
     model="ollama/qwen2.5-coder:7b",
     base_url="http://localhost:11434",
     temperature=0.1 # Temperatura bassa per risposte tecniche e deterministiche
-)'''
+)"""
 
-'''# ==========================================
+"""# ==========================================
 # TRUCCO SRE: FORZARE IL TOOL CALLING (OPENAI EMULATION)
 # ==========================================
 # LiteLLM (usato da CrewAI) richiede una chiave fittizia per i provider OpenAI-compatibili
@@ -61,13 +60,16 @@ local_llm = LLM(
     # Puntiamo all'endpoint /v1 di Ollama che gestisce il function calling standard
     base_url="http://localhost:11434/v1",
     temperature=0.1
-)'''
+)"""
 
 local_llm = LLM(
     model="openai/gpt-4.1-mini",  # o "openai/gpt-4.1-mini" se più stabile
     base_url=os.getenv("OPENAI_BASE_URL"),
-    temperature=0.1  # bassa temperatura per comandi infrastrutturali deterministici
+    api_key=os.getenv("OPENAI_API_KEY"),
+    temperature=0.1,  # bassa temperatura per comandi infrastrutturali deterministici
 )
+
+
 # ==========================================
 # 2. DATA CONTRACT DEFINITION (PYDANTIC)
 # ==========================================
@@ -80,16 +82,19 @@ class AlertPayload(BaseModel):
     severity: str
     description: str
 
+
 # ==========================================
 # 3. ENDPOINT REST
 # ==========================================
 @app.post("/api/v1/alerts/analyze")
 def analyze_alert(alert: AlertPayload):
     """
-    Riceve un webhook da n8n/Alertmanager, inietta i dati nella CrewAI 
+    Riceve un webhook da n8n/Alertmanager, inietta i dati nella CrewAI
     e restituisce un report Markdown di investigazione iniziale.
     """
-    print(f"🚀 [AIOps] Ricevuto allarme {alert.severity.upper()}: {alert.alertname} sul pod '{alert.pod}'")
+    print(
+        f"🚀 [AIOps] Ricevuto allarme {alert.severity.upper()}: {alert.alertname} sul pod '{alert.pod}'"
+    )
 
     # Estrazione e formattazione dinamica del payload per il prompt dell'agente
     alert_context = (
@@ -110,47 +115,49 @@ def analyze_alert(alert: AlertPayload):
         Intercetta le azioni dell'agente controllando esplicitamente la classe dell'oggetto.
         Fornisce un Audit Trail pulito per gli strumenti MCP.
         """
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("🕵️  [AUDIT TRAIL - ESECUZIONE SRE]")
-        
+
         try:
             # CrewAI a volte passa una lista, a volte un singolo oggetto
             steps = step_output if isinstance(step_output, list) else [step_output]
-            
+
             for step in steps:
                 # Se CrewAI incapsula l'azione in una tupla (Azione, Risultato), prendiamo l'Azione
                 action = step[0] if isinstance(step, tuple) else step
-                
+
                 # Identifichiamo il tipo di oggetto in modo esatto
                 class_name = type(action).__name__
-                
-                if class_name == 'AgentAction':
-                    print(f"⚙️  TOOL K8S INVOCATO : {getattr(action, 'tool', 'Sconosciuto')}")
+
+                if class_name == "AgentAction":
+                    print(
+                        f"⚙️  TOOL K8S INVOCATO : {getattr(action, 'tool', 'Sconosciuto')}"
+                    )
                     print("📦 PAYLOAD JSON      :")
                     import pprint
-                    pprint.pprint(getattr(action, 'tool_input', {}), indent=4)
-                    
+
+                    pprint.pprint(getattr(action, "tool_input", {}), indent=4)
+
                     # Stampiamo il pensiero dell'agente prima di usare il tool
-                    if hasattr(action, 'log') and action.log:
-                        thought = action.log.split('Action:')[0].strip()
+                    if hasattr(action, "log") and action.log:
+                        thought = action.log.split("Action:")[0].strip()
                         print(f"🧠 RAGIONAMENTO      : {thought}")
-                        
-                elif class_name == 'AgentFinish':
+
+                elif class_name == "AgentFinish":
                     print("✅ TASK COMPLETATO (AgentFinish)")
                     # Non stampiamo tutto il testo qui perché CrewAI lo formatterà in verde alla fine
-                    
+
         except Exception as e:
             print(f"⚠️ Errore silente nella callback di audit: {e}")
-            
-        print("="*60 + "\n")
 
+        print("=" * 60 + "\n")
 
     # ==========================================
     # 1. L'Investigatore (Triage)
     # ==========================================
     triage_agent = Agent(
-        role='L1 SRE Incident Commander',
-        goal='Parse raw monitoring alerts into structured incident briefs, identifying the blast radius and affected system components.',
+        role="L1 SRE Incident Commander",
+        goal="Parse raw monitoring alerts into structured incident briefs, identifying the blast radius and affected system components.",
         backstory=(
             "You are the first line of defense in a modern Cloud-Native reliability team. "
             "Your job is not to solve the problem, but to structure the chaos. "
@@ -158,7 +165,7 @@ def analyze_alert(alert: AlertPayload):
             "evaluate the severity, and summarize the observable symptoms for the diagnostic team."
         ),
         llm=local_llm,
-        verbose=True
+        verbose=True,
     )
 
     triage_task = Task(
@@ -170,15 +177,15 @@ def analyze_alert(alert: AlertPayload):
             "Output a concise Incident Brief."
         ),
         expected_output="A structured Incident Brief identifying the exact target resources, symptoms, and severity.",
-        agent=triage_agent
+        agent=triage_agent,
     )
 
     # ==========================================
     # 2. L'Analista (Cloud Architect)
     # ==========================================
     analysis_agent = Agent(
-        role='Senior Cloud Ops Diagnostician',
-        goal='Conduct a systematic root cause analysis by dynamically interrogating cluster state, telemetry, and related configurations.',
+        role="Senior Cloud Ops Diagnostician",
+        goal="Conduct a systematic root cause analysis by dynamically interrogating cluster state, telemetry, and related configurations.",
         backstory=(
             "You are a methodical Kubernetes and Cloud infrastructure expert. You do not guess; you gather evidence. "
             "You follow a strict diagnostic loop: Symptom -> Hypothesis -> Fetch Data -> Validate. "
@@ -188,9 +195,9 @@ def analyze_alert(alert: AlertPayload):
             "Investigate the ecosystem around the failing component."
         ),
         llm=local_llm,
-        mcps=[kubernetes_mcp], 
+        mcps=[kubernetes_mcp],
         step_callback=k8s_action_callback,
-        verbose=True
+        verbose=True,
     )
 
     analysis_task = Task(
@@ -205,15 +212,15 @@ def analyze_alert(alert: AlertPayload):
             "5. Conclude with a definitive, evidence-based root cause, explicitly naming the correct configurations if a mismatch is found."
         ),
         expected_output="A comprehensive diagnostic report detailing the evidence found, the root cause, and the correct target variables/endpoints discovered in the cluster.",
-        agent=analysis_agent
+        agent=analysis_agent,
     )
 
     # ==========================================
     # 3. Il Risolutore (DevOps Engineer)
     # ==========================================
     remediation_agent = Agent(
-        role='GitOps Automation Engineer',
-        goal='Translate the diagnostic root cause into precise, committable Infrastructure-as-Code (IaC) patches and open a GitHub PR.',
+        role="GitOps Automation Engineer",
+        goal="Translate the diagnostic root cause into precise, committable Infrastructure-as-Code (IaC) patches and open a GitHub PR.",
         backstory=(
             "You are a strict DevOps engineer operating in a Zero-Touch, GitOps-driven environment. "
             "You NEVER execute imperative state-changing commands on the cluster. "
@@ -225,9 +232,9 @@ def analyze_alert(alert: AlertPayload):
             "5. Use 'create_gitops_pull_request' to open the PR with a professional title and the Architect's report as the body."
         ),
         llm=local_llm,
-        mcps=[github_mcp], # <--- GLI DIAMO LE MANI!
-        step_callback=k8s_action_callback, # Usiamo la stessa callback per vedere cosa fa
-        verbose=True
+        mcps=[github_mcp],  # <--- GLI DIAMO LE MANI!
+        step_callback=k8s_action_callback,  # Usiamo la stessa callback per vedere cosa fa
+        verbose=True,
     )
 
     remediation_task = Task(
@@ -235,16 +242,16 @@ def analyze_alert(alert: AlertPayload):
             "Review the root cause analysis provided by the Cloud Architect. "
             "Your objective is to physically open a Pull Request to fix the infrastructure state. "
             "ENVIRONMENT VARIABLES: "
-            "TARGET_GITHUB_REPO: 'Lebroms/cloudops_shoes' "  
+            "TARGET_GITHUB_REPO: 'Lebroms/cloudops_shoes' "
             "EXECUTION WORKFLOW: "
-            "1. Search the TARGET_GITHUB_REPO to find the exact file path containing the misconfiguration. You can search for the resource name ) or the wrong value. " # (e.g., Kubernetes YAMLs, Terraform .tf files, Dockerfiles, or ConfigMaps)
+            "1. Search the TARGET_GITHUB_REPO to find the exact file path containing the misconfiguration. You can search for the resource name ) or the wrong value. "  # (e.g., Kubernetes YAMLs, Terraform .tf files, Dockerfiles, or ConfigMaps)
             "2. Once you have the exact file path, use the 'get_file_content' tool to fetch its raw content. "
             "3. Analyze the raw code and apply a surgical fix to resolve the root cause WITHOUT altering unrelated configurations. "
             "4. Use the 'create_gitops_pull_request' tool on the TARGET_GITHUB_REPO to open the PR with the updated file content. "
             "5. Make sure the PR title is professional and the body summarizes the architectural fix."
         ),
         expected_output="A success message confirming the Pull Request was created, explicitly including the GitHub URL.",
-        agent=remediation_agent
+        agent=remediation_agent,
     )
 
     # ==========================================
@@ -253,7 +260,7 @@ def analyze_alert(alert: AlertPayload):
     sre_crew = Crew(
         agents=[triage_agent, analysis_agent, remediation_agent],
         tasks=[triage_task, analysis_task, remediation_task],
-        process=Process.sequential # L'output di un task diventa il contesto del successivo
+        process=Process.sequential,  # L'output di un task diventa il contesto del successivo
     )
 
     try:
@@ -261,16 +268,15 @@ def analyze_alert(alert: AlertPayload):
         # L'esecuzione è sincrona, ma FastAPI usa un threadpool per non bloccare il server
         risultato = sre_crew.kickoff()
         print("✅ [AIOps] Analisi completata con successo.")
-        
+
         # Restituiamo il JSON a n8n. CrewAI restituisce un oggetto, usiamo .raw per il testo puro.
-        return {
-            "status": "success", 
-            "pod_target": alert.pod,
-            "report": risultato.raw
-        }
+        return {"status": "success", "pod_target": alert.pod, "report": risultato.raw}
     except Exception as e:
         print(f"❌ [AIOps] Errore critico durante l'esecuzione della Crew: {str(e)}")
-        raise HTTPException(status_code=500, detail="Errore interno del motore AI durante l'analisi.")
+        raise HTTPException(
+            status_code=500, detail="Errore interno del motore AI durante l'analisi."
+        )
+
 
 # ==========================================
 # 4. AVVIO DEL SERVER
